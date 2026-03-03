@@ -162,7 +162,7 @@ RUN mkdir -p /root/.gradle && \
 # ── Flutter SDK ──────────────────────────────
 RUN git clone --depth 1 --branch ${FLUTTER_VERSION} \
       https://github.com/flutter/flutter.git ${FLUTTER_HOME} && \
-    flutter precache --android && \
+    flutter precache --android --universal && \
     flutter doctor --android-licenses 2>/dev/null; true
 
 # ── Verify installation ─────────────────────
