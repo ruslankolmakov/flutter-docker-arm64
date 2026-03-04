@@ -7,6 +7,11 @@
 # Solves: AAPT2 x86_64 binary crash on ARM64 Linux.
 # Uses ARM64-native build-tools from lzhiyong/android-sdk-tools
 # and system clang-19 to replace NDK's x86_64 toolchain.
+#
+# gen_snapshot: Flutter 3.38.3 has no linux-arm64 build.
+# OrbStack runs x86_64 ELFs natively via binfmt_misc (kernel level).
+# We create a linux-arm64/gen_snapshot wrapper that calls linux-x64/gen_snapshot
+# directly. libc6:amd64 provides /lib64/ld-linux-x86-64.so.2 needed by the ELF.
 ###############################################
 
 FROM ubuntu:24.04
@@ -30,7 +35,16 @@ ENV ANDROID_HOME=/opt/android-sdk \
 ENV PATH="${FLUTTER_HOME}/bin:${FLUTTER_HOME}/bin/cache/dart-sdk/bin:${ANDROID_HOME}/cmdline-tools/latest/bin:${ANDROID_HOME}/platform-tools:${ANDROID_HOME}/build-tools/${BUILD_TOOLS_VERSION}:${PATH}"
 
 # ── System packages ──────────────────────────
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Note: dpkg --add-architecture amd64 + archive.ubuntu.com source enables x86_64 packages.
+# libc6:amd64 provides /lib64/ld-linux-x86-64.so.2 required by gen_snapshot
+# (Flutter 3.38.3 only ships linux-x64/gen_snapshot; OrbStack runs it via binfmt_misc).
+RUN dpkg --add-architecture amd64 && \
+    # ports.ubuntu.com doesn't serve amd64; add archive.ubuntu.com for amd64 packages
+    sed -i 's|URIs: http://ports.ubuntu.com/ubuntu-ports/|Architectures: arm64\nURIs: http://ports.ubuntu.com/ubuntu-ports/|g' \
+        /etc/apt/sources.list.d/ubuntu.sources && \
+    printf 'Types: deb\nURIs: http://archive.ubuntu.com/ubuntu\nSuites: noble noble-updates noble-security\nComponents: main\nArchitectures: amd64\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n' \
+        > /etc/apt/sources.list.d/amd64.sources && \
+    apt-get update && apt-get install -y --no-install-recommends \
     curl \
     git \
     unzip \
@@ -46,8 +60,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # ARM64-native cmake & ninja (replaces SDK's x86_64 cmake)
     cmake \
     ninja-build \
-    # x86_64 emulation for Flutter's gen_snapshot (not published for linux-arm64)
-    qemu-user-static \
+    # x86_64 glibc for gen_snapshot (x86_64 ELF needs /lib64/ld-linux-x86-64.so.2)
+    libc6:amd64 \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Android SDK (cmdline-tools) ──────────────
@@ -169,13 +183,15 @@ RUN git clone --depth 1 --branch ${FLUTTER_VERSION} \
 
 # ── gen_snapshot ARM64 wrapper ────────────────
 # Flutter 3.38.3 does not publish linux-arm64/gen_snapshot.
-# Wrap the linux-x64 binary with qemu-x86_64-static so it runs on ARM64 hosts.
+# Create a linux-arm64/gen_snapshot that calls the linux-x64 binary directly.
+# OrbStack runs x86_64 ELFs via kernel-level binfmt_misc; libc6:amd64 provides
+# the x86_64 dynamic linker (/lib64/ld-linux-x86-64.so.2) needed by the binary.
 RUN for dir in ${FLUTTER_HOME}/bin/cache/artifacts/engine/android-*-release/; do \
       x64_bin="${dir}linux-x64/gen_snapshot"; \
       arm64_dir="${dir}linux-arm64"; \
       [ -f "${x64_bin}" ] || continue; \
       mkdir -p "${arm64_dir}"; \
-      printf '#!/bin/sh\nexec /usr/bin/qemu-x86_64-static "%s" "$@"\n' "${x64_bin}" \
+      printf '#!/bin/sh\nexec "%s" "$@"\n' "${x64_bin}" \
         > "${arm64_dir}/gen_snapshot"; \
       chmod +x "${arm64_dir}/gen_snapshot"; \
       echo "Created gen_snapshot wrapper for $(basename ${dir})"; \
