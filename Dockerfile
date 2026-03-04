@@ -46,6 +46,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # ARM64-native cmake & ninja (replaces SDK's x86_64 cmake)
     cmake \
     ninja-build \
+    # x86_64 emulation for Flutter's gen_snapshot (not published for linux-arm64)
+    qemu-user-static \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Android SDK (cmdline-tools) ──────────────
@@ -162,8 +164,22 @@ RUN mkdir -p /root/.gradle && \
 # ── Flutter SDK ──────────────────────────────
 RUN git clone --depth 1 --branch ${FLUTTER_VERSION} \
       https://github.com/flutter/flutter.git ${FLUTTER_HOME} && \
-    flutter precache --android --universal && \
+    flutter precache --android && \
     flutter doctor --android-licenses 2>/dev/null; true
+
+# ── gen_snapshot ARM64 wrapper ────────────────
+# Flutter 3.38.3 does not publish linux-arm64/gen_snapshot.
+# Wrap the linux-x64 binary with qemu-x86_64-static so it runs on ARM64 hosts.
+RUN for dir in ${FLUTTER_HOME}/bin/cache/artifacts/engine/android-*-release/; do \
+      x64_bin="${dir}linux-x64/gen_snapshot"; \
+      arm64_dir="${dir}linux-arm64"; \
+      [ -f "${x64_bin}" ] || continue; \
+      mkdir -p "${arm64_dir}"; \
+      printf '#!/bin/sh\nexec /usr/bin/qemu-x86_64-static "%s" "$@"\n' "${x64_bin}" \
+        > "${arm64_dir}/gen_snapshot"; \
+      chmod +x "${arm64_dir}/gen_snapshot"; \
+      echo "Created gen_snapshot wrapper for $(basename ${dir})"; \
+    done
 
 # ── Verify installation ─────────────────────
 RUN java -version && \
