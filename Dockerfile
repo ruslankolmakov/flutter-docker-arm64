@@ -197,10 +197,53 @@ RUN for dir in ${FLUTTER_HOME}/bin/cache/artifacts/engine/android-*-release/; do
       echo "Created gen_snapshot wrapper for $(basename ${dir})"; \
     done
 
+# ── Shorebird CLI ────────────────────────────
+# Pre-install Shorebird so CI jobs don't need `curl | bash` at runtime.
+ARG SHOREBIRD_VERSION=1.6.85
+ENV SHOREBIRD_HOME=/root/.shorebird
+ENV PATH="${SHOREBIRD_HOME}/bin:${PATH}"
+
+RUN curl --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/shorebirdtech/install/main/install.sh | bash && \
+    cd ${SHOREBIRD_HOME}/bin && \
+    git fetch --tags && \
+    git checkout v${SHOREBIRD_VERSION} && \
+    shorebird --version
+
+# ── gen_snapshot wrapper for Shorebird's Flutter ──
+# Shorebird bundles its own Flutter in ~/.shorebird/bin/cache/flutter/<hash>/.
+# Same issue: no linux-arm64/gen_snapshot. Create wrappers like for main Flutter.
+RUN for flutter_dir in ${SHOREBIRD_HOME}/bin/cache/flutter/*/; do \
+      [ -d "${flutter_dir}" ] || continue; \
+      for dir in ${flutter_dir}bin/cache/artifacts/engine/android-*-release/; do \
+        x64_bin="${dir}linux-x64/gen_snapshot"; \
+        arm64_dir="${dir}linux-arm64"; \
+        [ -f "${x64_bin}" ] || continue; \
+        mkdir -p "${arm64_dir}"; \
+        printf '#!/bin/sh\nexec "%s" "$@"\n' "${x64_bin}" \
+          > "${arm64_dir}/gen_snapshot"; \
+        chmod +x "${arm64_dir}/gen_snapshot"; \
+        echo "Created Shorebird gen_snapshot wrapper for $(basename ${dir})"; \
+      done; \
+    done
+
+# ── Runtime gen_snapshot patcher (safety net) ──
+# Shorebird may download Flutter only at first `shorebird release`, not at install.
+# This script patches any new Flutter caches that appear at runtime in CI.
+# patch-shorebird-gen-snapshot: patches any Shorebird Flutter caches (one-shot)
+RUN printf '#!/bin/sh\nfor flutter_dir in /root/.shorebird/bin/cache/flutter/*/; do\n  [ -d "${flutter_dir}" ] || continue\n  for dir in ${flutter_dir}bin/cache/artifacts/engine/android-*-release/; do\n    x64_bin="${dir}linux-x64/gen_snapshot"\n    arm64_dir="${dir}linux-arm64"\n    [ -f "${x64_bin}" ] || continue\n    [ -f "${arm64_dir}/gen_snapshot" ] && continue\n    mkdir -p "${arm64_dir}"\n    printf '"'"'#!/bin/sh\\nexec "%%s" "$@"\\n'"'"' "${x64_bin}" > "${arm64_dir}/gen_snapshot"\n    chmod +x "${arm64_dir}/gen_snapshot"\n    echo "Patched gen_snapshot for $(basename ${dir})"\n  done\ndone\n' > /usr/local/bin/patch-shorebird-gen-snapshot && \
+    chmod +x /usr/local/bin/patch-shorebird-gen-snapshot
+
+# shorebird-wrapper: runs patch-shorebird-gen-snapshot in background polling,
+# then executes shorebird command. Ensures gen_snapshot wrappers are created
+# as soon as Shorebird downloads engine artifacts during release/patch.
+RUN printf '#!/bin/sh\n# Background patcher: poll every 2s while shorebird runs\n(\n  while true; do\n    patch-shorebird-gen-snapshot 2>/dev/null\n    sleep 2\n  done\n) &\nPATCHER_PID=$!\n\n# Run the actual shorebird command\nshorebird "$@"\nEXIT_CODE=$?\n\nkill $PATCHER_PID 2>/dev/null\nexit $EXIT_CODE\n' > /usr/local/bin/shorebird-wrapper && \
+    chmod +x /usr/local/bin/shorebird-wrapper
+
 # ── Verify installation ─────────────────────
 RUN java -version && \
     aapt2 version && \
     adb version && \
+    shorebird --version && \
     flutter doctor -v; true
 
 WORKDIR /app
